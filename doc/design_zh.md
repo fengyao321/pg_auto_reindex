@@ -13,22 +13,22 @@
 
 ```mermaid
 graph TD
-    A[Background Worker main loop] -->|Naptime 唤醒| B[CollectSystemMetricsAndLearnerUpdate]
-    A --> C{IsSystemIdle?}
-    C -->|Yes| D[CleanupInvalidIndexes]
-    D --> E[ExecuteAutoReindexCycle]
-    E --> F[更新 pg_auto_reindex_history]
-    C -->|No| A
-    B --> G[(Shared Memory EWMA Slots)]
+    A["Background Worker main loop"] -->|"Naptime 唤醒"| B["CollectSystemMetricsAndLearnerUpdate"]
+    B --> C{"IsSystemIdle?"}
+    C -->|"Yes"| D["CleanupInvalidIndexes"]
+    D --> E["ExecuteAutoReindexCycle"]
+    E --> F["更新 pg_auto_reindex_history"]
+    C -->|"No"| A
+    B --> G[("Shared Memory EWMA Slots")]
     C --> G
-    
-    subgraph 共享内存状态 (AutoReindexSharedState)
-        G1[168 时间槽状态矩阵]
-        G2[当前重建的 Index OID]
-        G3[上次重建时间]
-        G4[累计重建次数和节省空间]
+
+    subgraph SHM["共享内存状态 AutoReindexSharedState"]
+        G1["168 时间槽状态矩阵"]
+        G2["当前重建的 Index OID"]
+        G3["上次重建时间"]
+        G4["累计重建次数和节省空间"]
     end
-    G -.-> 共享内存状态
+    G -.-> SHM
 ```
 
 ### 共享内存设计

@@ -19,19 +19,19 @@ The extension operates as a Background Worker that periodically samples system m
 
 ```mermaid
 flowchart TD
-    subgraph Background Worker [pg_auto_reindex worker]
-        A[Wake up on Naptime] --> B(Collect System Metrics)
-        B --> C{Is System Idle?}
-        C -- Yes --> D[Cleanup Invalid Indexes]
-        D --> E[Identify Bloated Indexes]
-        E --> F[Execute REINDEX CONCURRENTLY]
-        C -- No --> G[Sleep]
+    subgraph BGW["pg_auto_reindex worker"]
+        A["Wake up on Naptime"] --> B("Collect System Metrics")
+        B --> C{"Is System Idle?"}
+        C -- Yes --> D["Cleanup Invalid Indexes"]
+        D --> E["Identify Bloated Indexes"]
+        E --> F["Execute REINDEX CONCURRENTLY"]
+        C -- No --> G["Sleep"]
         F --> G
     end
 
-    subgraph Shared Memory [AutoReindexSharedState]
-        H[(168 Time-Slot EWMA Matrix)]
-        I[Global Status Metrics]
+    subgraph SHM["AutoReindexSharedState"]
+        H[("168 Time-Slot EWMA Matrix")]
+        I["Global Status Metrics"]
     end
 
     B <--> H

@@ -3,7 +3,7 @@
  * pg_auto_reindex.c
  *		Autonomous idle learning & background concurrent reindexing.
  *
- * Copyright (c) 2026, PostgreSQL Global Development Group
+ * Copyright (c) 2026, fengyao <fengyao0087@gmail.com>
  *
  * IDENTIFICATION
  *	  contrib/pg_auto_reindex/pg_auto_reindex.c

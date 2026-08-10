@@ -3,7 +3,7 @@
  * idle_learner.c
  *		Resource metric sampling and 168 time-slots EWMA learning.
  *
- * Copyright (c) 2026, PostgreSQL Global Development Group
+ * Copyright (c) 2026, fengyao <fengyao0087@gmail.com>
  *
  * IDENTIFICATION
  *	  contrib/pg_auto_reindex/idle_learner.c

@@ -111,6 +111,11 @@ cleanup() {
     jobs -p 2>/dev/null | xargs -r kill 2>/dev/null || true
     wait 2>/dev/null || true
 
+    # 恢复全局配置
+    run_sql "postgres" "ALTER SYSTEM RESET pg_auto_reindex.min_bloat_ratio;" 2>/dev/null || true
+    run_sql "postgres" "ALTER SYSTEM RESET pg_auto_reindex.min_bloat_bytes;" 2>/dev/null || true
+    run_sql "postgres" "SELECT pg_reload_conf();" 2>/dev/null || true
+
     if [ "$CLEANUP_ON_EXIT" = true ]; then
         log_step "删除测试数据库: ${TESTDB}"
         run_sql "postgres" "DROP DATABASE IF EXISTS ${TESTDB};" 2>/dev/null || true
@@ -386,7 +391,7 @@ SELECT
     schemaname,
     indexname,
     pg_size_pretty(current_bytes) AS current_size,
-    round(estimated_bloat_ratio * 100, 1) || '%' AS bloat_pct,
+    round((estimated_bloat_ratio * 100)::numeric, 1) || '%' AS bloat_pct,
     pg_size_pretty(estimated_bloat_bytes) AS bloat_size
 FROM pg_auto_reindex_bloat_report()
 ORDER BY estimated_bloat_bytes DESC;
@@ -410,11 +415,10 @@ run_sql_v "${TESTDB}" "SELECT * FROM pg_auto_reindex_status();"
 log_section "Phase 5: 调整 GUC 参数 & 手动触发 Reindex 测试"
 
 # 降低阈值使得更容易触发 reindex
-log_step "降低膨胀阈值以便测试 (min_bloat_ratio=0.10)..."
-run_sql "${TESTDB}" "
-ALTER SYSTEM SET pg_auto_reindex.min_bloat_ratio = 0.10;
-SELECT pg_reload_conf();
-"
+log_step "降低膨胀阈值以便测试 (min_bloat_ratio=0.10, min_bloat_bytes=1MB)..."
+run_sql "${TESTDB}" "ALTER SYSTEM SET pg_auto_reindex.min_bloat_ratio = 0.10;"
+run_sql "${TESTDB}" "ALTER SYSTEM SET pg_auto_reindex.min_bloat_bytes = '1MB';"
+run_sql "${TESTDB}" "SELECT pg_reload_conf();"
 # 等待配置生效
 sleep 2
 
@@ -661,7 +665,7 @@ SELECT
     schemaname,
     indexname,
     pg_size_pretty(current_bytes) AS current_size,
-    round(estimated_bloat_ratio * 100, 1) || '%' AS bloat_pct,
+    round((estimated_bloat_ratio * 100)::numeric, 1) || '%' AS bloat_pct,
     pg_size_pretty(estimated_bloat_bytes) AS bloat_size
 FROM pg_auto_reindex_bloat_report()
 ORDER BY estimated_bloat_bytes DESC;
@@ -719,10 +723,10 @@ ORDER BY pg_total_relation_size(oid) DESC;
 
 # ========================== 汇总结论 ==========================
 FINAL_REINDEX_COUNT=$(run_sql "${TESTDB}" "SELECT count(*) FROM pg_auto_reindex_history;" 2>/dev/null || echo "0")
-FINAL_BYTES_SAVED=$(run_sql "${TESTDB}" "SELECT coalesce(sum(bytes_saved), 0) FROM pg_auto_reindex_history WHERE status = 'success';" 2>/dev/null || echo "0")
+FINAL_BYTES_SAVED=$(run_sql "${TESTDB}" "SELECT coalesce(sum(bytes_saved), 0) FROM pg_auto_reindex_history WHERE upper(status) = 'SUCCESS';" 2>/dev/null || echo "0")
 FINAL_BYTES_PRETTY=$(run_sql "${TESTDB}" "SELECT pg_size_pretty(${FINAL_BYTES_SAVED}::bigint);" 2>/dev/null || echo "0 bytes")
-FINAL_SUCCESS=$(run_sql "${TESTDB}" "SELECT count(*) FROM pg_auto_reindex_history WHERE status = 'success';" 2>/dev/null || echo "0")
-FINAL_FAILED=$(run_sql "${TESTDB}" "SELECT count(*) FROM pg_auto_reindex_history WHERE status != 'success';" 2>/dev/null || echo "0")
+FINAL_SUCCESS=$(run_sql "${TESTDB}" "SELECT count(*) FROM pg_auto_reindex_history WHERE upper(status) = 'SUCCESS';" 2>/dev/null || echo "0")
+FINAL_FAILED=$(run_sql "${TESTDB}" "SELECT count(*) FROM pg_auto_reindex_history WHERE upper(status) != 'SUCCESS';" 2>/dev/null || echo "0")
 EWMA_SLOTS_WITH_DATA=$(run_sql "${TESTDB}" "SELECT count(*) FROM pg_auto_reindex_stats() WHERE sample_count > 0;" 2>/dev/null || echo "0")
 
 echo ""
@@ -750,7 +754,6 @@ echo ""
 log_info "完成! 日志保存在: ${LOG_DIR}"
 
 # 恢复默认配置
-run_sql "${TESTDB}" "
-ALTER SYSTEM RESET pg_auto_reindex.min_bloat_ratio;
-SELECT pg_reload_conf();
-" 2>/dev/null || true
+run_sql "${TESTDB}" "ALTER SYSTEM RESET pg_auto_reindex.min_bloat_ratio;" 2>/dev/null || true
+run_sql "${TESTDB}" "ALTER SYSTEM RESET pg_auto_reindex.min_bloat_bytes;" 2>/dev/null || true
+run_sql "${TESTDB}" "SELECT pg_reload_conf();" 2>/dev/null || true

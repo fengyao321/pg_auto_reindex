@@ -109,8 +109,9 @@ CleanupInvalidIndexes(void)
             char *index = SPI_getvalue(tuple, tupdesc, 2);
             char drop_cmd[512];
 
+            bool is_in_xact = IsTransactionState();
             snprintf(drop_cmd, sizeof(drop_cmd),
-                     "DROP INDEX CONCURRENTLY IF EXISTS %s.%s;",
+                     is_in_xact ? "DROP INDEX IF EXISTS %s.%s;" : "DROP INDEX CONCURRENTLY IF EXISTS %s.%s;",
                      quote_identifier(schema),
                      quote_identifier(index));
 
@@ -151,7 +152,7 @@ ExecuteAutoReindexCycle(void)
 
     typedef struct CandidateIndex
     {
-        Oid   oid;
+        Oid oid;
         char *schema;
         char *name;
         int64 current_bytes;
@@ -169,19 +170,20 @@ ExecuteAutoReindexCycle(void)
         "JOIN pg_index i ON i.indexrelid = c.oid "
         "JOIN pg_namespace n ON n.oid = c.relnamespace "
         "LEFT JOIN ( "
-        "  SELECT starelid, SUM(stawidth) AS avg_width "
-        "  FROM pg_statistic "
-        "  GROUP BY starelid "
-        ") s ON s.starelid = i.indrelid "
+        "  SELECT s.starelid, i.indexrelid, SUM(s.stawidth) AS avg_width "
+        "  FROM pg_statistic s "
+        "  JOIN pg_index i ON s.starelid = i.indrelid AND s.staattnum = ANY(i.indkey) "
+        "  GROUP BY s.starelid, i.indexrelid "
+        ") s ON s.indexrelid = c.oid "
         "WHERE c.relkind = 'i' "
         "  AND i.indisvalid = true "
         "  AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast') "
         "  AND pg_relation_size(c.oid) >= $1 "
         "  AND ROUND( "
         "    (CASE WHEN c.relpages > 0 THEN "
-        "      ((c.relpages - GREATEST(CEIL(c.reltuples * (COALESCE(s.avg_width, 16) + 8) / (8192 - 64)), 1)) / c.relpages::numeric) "
+        "      ((c.relpages - GREATEST(CEIL(c.reltuples * (COALESCE(s.avg_width, 8) + 8) / (8192 - 64)), 1)) / c.relpages::numeric) "
         "    ELSE 0 END)::numeric, 2)::float8 >= $2 "
-        "ORDER BY (pg_relation_size(c.oid) - (GREATEST(CEIL(c.reltuples * (COALESCE(s.avg_width, 16) + 8) / (8192 - 64)), 1) * 8192)) DESC "
+        "ORDER BY (pg_relation_size(c.oid) - (GREATEST(CEIL(c.reltuples * (COALESCE(s.avg_width, 8) + 8) / (8192 - 64)), 1) * 8192)) DESC "
         "LIMIT 16;";
 
     if (!IsTransactionState())
@@ -232,12 +234,14 @@ ExecuteAutoReindexCycle(void)
         TimestampTz start_t, end_t;
         int64 bytes_before, bytes_after;
         bool success = false;
+        bool started_reindex_xact = false;
+        bool is_in_xact = IsTransactionState();
 
         snprintf(set_lock_timeout, sizeof(set_lock_timeout),
                  "SET lock_timeout = '%dms';", guc_lock_timeout_ms);
 
         snprintf(reindex_cmd, sizeof(reindex_cmd),
-                 "REINDEX INDEX CONCURRENTLY %s.%s;",
+                 is_in_xact ? "REINDEX INDEX %s.%s;" : "REINDEX INDEX CONCURRENTLY %s.%s;",
                  quote_identifier(candidates[i].schema),
                  quote_identifier(candidates[i].name));
 
@@ -251,11 +255,16 @@ ExecuteAutoReindexCycle(void)
             LWLockRelease(AutoReindexShared->lock);
         }
 
-        elog(LOG, "pg_auto_reindex: Starting REINDEX INDEX CONCURRENTLY %s.%s (Size: %ld MB)",
+        elog(LOG, "pg_auto_reindex: Starting REINDEX %s.%s (Size: %ld MB)",
              candidates[i].schema, candidates[i].name, bytes_before / (1024 * 1024));
 
-        SetCurrentStatementStartTimestamp();
-        StartTransactionCommand();
+        if (!IsTransactionState())
+        {
+            SetCurrentStatementStartTimestamp();
+            StartTransactionCommand();
+            started_reindex_xact = true;
+        }
+
         SPI_connect();
         PushActiveSnapshot(GetTransactionSnapshot());
 
@@ -273,7 +282,7 @@ ExecuteAutoReindexCycle(void)
             edata = CopyErrorData();
             FlushErrorState();
             success = false;
-            elog(WARNING, "pg_auto_reindex: REINDEX CONCURRENTLY %s.%s failed: %s",
+            elog(WARNING, "pg_auto_reindex: REINDEX %s.%s failed: %s",
                  candidates[i].schema, candidates[i].name, edata->message);
             FreeErrorData(edata);
         }
@@ -281,7 +290,8 @@ ExecuteAutoReindexCycle(void)
 
         SPI_finish();
         PopActiveSnapshot();
-        CommitTransactionCommand();
+        if (started_reindex_xact)
+            CommitTransactionCommand();
 
         end_t = GetCurrentTimestamp();
 
@@ -289,8 +299,14 @@ ExecuteAutoReindexCycle(void)
         bytes_after = bytes_before;
         if (success)
         {
-            SetCurrentStatementStartTimestamp();
-            StartTransactionCommand();
+            bool started_size_xact = false;
+            if (!IsTransactionState())
+            {
+                SetCurrentStatementStartTimestamp();
+                StartTransactionCommand();
+                started_size_xact = true;
+            }
+
             SPI_connect();
             PushActiveSnapshot(GetTransactionSnapshot());
 
@@ -307,7 +323,8 @@ ExecuteAutoReindexCycle(void)
 
             SPI_finish();
             PopActiveSnapshot();
-            CommitTransactionCommand();
+            if (started_size_xact)
+                CommitTransactionCommand();
         }
 
         /* Record History & Update Stats */

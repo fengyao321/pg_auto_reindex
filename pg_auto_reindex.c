@@ -80,47 +80,52 @@ _PG_init(void)
     DefineCustomBoolVariable("pg_auto_reindex.enabled",
                              "Enable or disable automatic index reindexing",
                              NULL, &guc_enabled, true,
-                             PGC_SUSET, 0, NULL, NULL, NULL);
+                             PGC_SIGHUP, 0, NULL, NULL, NULL);
 
     DefineCustomStringVariable("pg_auto_reindex.database",
                                "Target database for auto reindex background worker",
                                NULL, &guc_database, "postgres",
-                               PGC_SUSET, 0, NULL, NULL, NULL);
+                               PGC_SIGHUP, 0, NULL, NULL, NULL);
 
     DefineCustomIntVariable("pg_auto_reindex.naptime",
                             "Sampling interval in seconds",
                             NULL, &guc_naptime, 60, 1, 3600,
-                            PGC_SUSET, 0, NULL, NULL, NULL);
+                            PGC_SIGHUP, 0, NULL, NULL, NULL);
 
     DefineCustomRealVariable("pg_auto_reindex.idle_ratio_threshold",
                              "Threshold ratio of current load vs historical EWMA to consider idle",
                              NULL, &guc_idle_ratio_threshold, 0.70, 0.10, 1.00,
-                             PGC_USERSET, 0, NULL, NULL, NULL);
+                             PGC_SIGHUP, 0, NULL, NULL, NULL);
 
     DefineCustomRealVariable("pg_auto_reindex.max_idle_load",
                              "Maximum 1-min CPU load average allowed for idle state",
                              NULL, &guc_max_idle_load, 2.0, 0.1, 100.0,
-                             PGC_USERSET, 0, NULL, NULL, NULL);
+                             PGC_SIGHUP, 0, NULL, NULL, NULL);
 
     DefineCustomIntVariable("pg_auto_reindex.max_idle_backends",
                             "Maximum active backends allowed for idle state",
                             NULL, &guc_max_idle_backends, 15, 0, 1000,
-                            PGC_USERSET, 0, NULL, NULL, NULL);
+                            PGC_SIGHUP, 0, NULL, NULL, NULL);
 
     DefineCustomRealVariable("pg_auto_reindex.min_bloat_ratio",
                              "Minimum estimated bloat ratio to trigger reindex",
-                             NULL, &guc_min_bloat_ratio, 0.30, 0.05, 0.99,
-                             PGC_USERSET, 0, NULL, NULL, NULL);
+                             NULL, &guc_min_bloat_ratio, 0.30, 0.01, 0.99,
+                             PGC_SIGHUP, 0, NULL, NULL, NULL);
+
+    DefineCustomIntVariable("pg_auto_reindex.min_bloat_bytes",
+                            "Minimum index size in bytes to trigger reindex",
+                            NULL, (int *) &guc_min_bloat_bytes, 1048576, 0, INT_MAX,
+                            PGC_SIGHUP, GUC_UNIT_BYTE, NULL, NULL, NULL);
 
     DefineCustomIntVariable("pg_auto_reindex.lock_timeout_ms",
                             "Lock timeout in milliseconds during REINDEX CONCURRENTLY",
                             NULL, &guc_lock_timeout_ms, 5000, 100, 300000,
-                            PGC_USERSET, 0, NULL, NULL, NULL);
+                            PGC_SIGHUP, 0, NULL, NULL, NULL);
 
     DefineCustomIntVariable("pg_auto_reindex.max_reindexes_per_idle",
                             "Maximum indexes reindexed per idle window",
                             NULL, &guc_max_reindexes_per_idle, 2, 1, 100,
-                            PGC_USERSET, 0, NULL, NULL, NULL);
+                            PGC_SIGHUP, 0, NULL, NULL, NULL);
 
     if (!process_shared_preload_libraries_in_progress)
         return;

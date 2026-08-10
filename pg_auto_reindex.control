@@ -1,0 +1,5 @@
+# pg_auto_reindex extension
+comment = 'Autonomous background concurrent reindexing driven by idle learning'
+default_version = '1.0'
+module_pathname = '$libdir/pg_auto_reindex'
+relocatable = true

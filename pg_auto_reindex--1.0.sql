@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS pg_auto_reindex_history (
     bytes_before    bigint NOT NULL,
     bytes_after     bigint NOT NULL,
     bytes_saved     bigint GENERATED ALWAYS AS (bytes_before - bytes_after) STORED,
-    status          text NOT NULL
+    status          text NOT NULL,
+    created_at      timestamptz NOT NULL DEFAULT now()
 );
 
 SELECT pg_catalog.pg_extension_config_dump('pg_auto_reindex_history', '');

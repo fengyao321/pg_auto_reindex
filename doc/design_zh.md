@@ -62,6 +62,7 @@ graph TD
   - `bytes_before` 和 `bytes_after`：重建前后的索引字节大小
   - `bytes_saved`：自动计算回收的空间（生成列）
   - `status`：执行结果状态（如 `SUCCESS` 或 `TIMEOUT`）
+  - `created_at`：审计日志记录插入的时间戳（默认 `now()`）
 
 ## 4. GUC 参数详解
 

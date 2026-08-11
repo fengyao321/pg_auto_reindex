@@ -71,6 +71,7 @@ All reindex operations are logged into the `pg_auto_reindex_history` table:
 - `start_time`, `end_time`
 - `bytes_before`, `bytes_after`, `bytes_saved` (Generated)
 - `status` ('SUCCESS' or 'TIMEOUT')
+- `created_at` (Timestamp when audit record is created, default `now()`)
 
 ## 4. GUC Parameters
 

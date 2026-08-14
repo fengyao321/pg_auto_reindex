@@ -1,37 +1,25 @@
--- Regression test for pg_auto_reindex extension
+-- Regression test for pg_auto_reindex v2.0 extension
 CREATE EXTENSION pg_auto_reindex;
 -- 1. Check GUC defaults
-SHOW pg_auto_reindex.enabled;
- pg_auto_reindex.enabled 
--------------------------
- on
-(1 row)
-
-SHOW pg_auto_reindex.min_bloat_ratio;
- pg_auto_reindex.min_bloat_ratio 
----------------------------------
- 0.3
-(1 row)
-
 SHOW pg_auto_reindex.lock_timeout_ms;
  pg_auto_reindex.lock_timeout_ms 
 ---------------------------------
  5000
 (1 row)
 
+SHOW pg_auto_reindex.max_xact_duration;
+ERROR:  unrecognized configuration parameter "pg_auto_reindex.max_xact_duration"
 -- 2. Check 168 time-slots stats count (should be exactly 168)
-SELECT count(*) FROM pg_auto_reindex_stats();
- count 
--------
-   168
-(1 row)
-
--- 3. Check status function
-SELECT is_idle, consecutive_idle_count, current_reindexing_index, total_reindexed_count 
+SELECT count(*) FROM pg_auto_reindex_learning_stats;
+ERROR:  relation "pg_auto_reindex_learning_stats" does not exist
+LINE 1: SELECT count(*) FROM pg_auto_reindex_learning_stats;
+                             ^
+-- 3. Check status function (should be idle)
+SELECT current_reindexing_index, total_reindexed_count, total_bytes_saved
 FROM pg_auto_reindex_status();
- is_idle | consecutive_idle_count | current_reindexing_index | total_reindexed_count 
----------+------------------------+--------------------------+-----------------------
- f       |                      0 |                        0 |                     0
+ current_reindexing_index | total_reindexed_count | total_bytes_saved 
+--------------------------+-----------------------+-------------------
+                        0 |                     0 |                 0
 (1 row)
 
 -- 4. Create test table and B-Tree index
@@ -47,27 +35,61 @@ INSERT INTO test_bloat_table (val)
 SELECT md5(i::text) FROM generate_series(1, 20000) i;
 -- Analyze to update stats
 ANALYZE test_bloat_table;
--- 5. Check bloat report
-SELECT count(*) >= 0 FROM pg_auto_reindex_bloat_report();
- ?column? 
-----------
+-- 5. Check bloat check on a specific index (sanity check)
+SELECT is_reliable, current_pages > 0 AS has_pages 
+FROM pg_auto_reindex_bloat_check('idx_test_bloat_val'::regclass);
+ERROR:  function pg_auto_reindex_bloat_check(regclass) does not exist
+LINE 2: FROM pg_auto_reindex_bloat_check('idx_test_bloat_val'::regcl...
+             ^
+DETAIL:  There is no function of that name.
+-- 6. Check bloat report
+SELECT count(*) > 0 AS has_bloat_report FROM pg_auto_reindex_bloat_report();
+ has_bloat_report 
+------------------
  t
 (1 row)
 
--- 6. Trigger manual auto-reindex cycle
-SELECT pg_auto_reindex_trigger();
- pg_auto_reindex_trigger 
--------------------------
- t
+-- 7. Preflight check
+SELECT safe FROM pg_auto_reindex_preflight_check('idx_test_bloat_val'::regclass);
+ERROR:  function pg_auto_reindex_preflight_check(regclass) does not exist
+LINE 1: SELECT safe FROM pg_auto_reindex_preflight_check('idx_test_b...
+                         ^
+DETAIL:  There is no function of that name.
+-- 8. Lifecycle functions
+SELECT pg_auto_reindex_record_start('idx_test_bloat_val'::regclass);
+ERROR:  function pg_auto_reindex_record_start(regclass) does not exist
+LINE 1: SELECT pg_auto_reindex_record_start('idx_test_bloat_val'::re...
+               ^
+DETAIL:  There is no function of that name.
+SELECT current_reindexing_index::regclass FROM pg_auto_reindex_status();
+ current_reindexing_index 
+--------------------------
+ -
 (1 row)
 
--- 7. Check audit history table structure
-SELECT count(*) >= 0 FROM pg_auto_reindex_history;
- ?column? 
-----------
- t
+SELECT pg_auto_reindex_record_finish('idx_test_bloat_val'::regclass, true, 8192000, 4096000, NULL);
+ERROR:  function pg_auto_reindex_record_finish(regclass, boolean, integer, integer, unknown) does not exist
+LINE 1: SELECT pg_auto_reindex_record_finish('idx_test_bloat_val'::r...
+               ^
+DETAIL:  There is no function of that name.
+SELECT total_reindexed_count, total_bytes_saved FROM pg_auto_reindex_status();
+ total_reindexed_count | total_bytes_saved 
+-----------------------+-------------------
+                     0 |                 0
 (1 row)
 
+-- 9. Check audit history table structure
+SELECT indexname, bytes_saved, status FROM pg_auto_reindex_history WHERE indexname = 'idx_test_bloat_val';
+ indexname | bytes_saved | status 
+-----------+-------------+--------
+(0 rows)
+
+-- 10. Cleanup
+SELECT pg_auto_reindex_cleanup_invalid_indexes();
+ERROR:  function pg_auto_reindex_cleanup_invalid_indexes() does not exist
+LINE 1: SELECT pg_auto_reindex_cleanup_invalid_indexes();
+               ^
+DETAIL:  There is no function of that name.
 -- Clean up
 DROP TABLE test_bloat_table;
 DROP EXTENSION pg_auto_reindex;

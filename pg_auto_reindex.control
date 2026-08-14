@@ -1,5 +1,6 @@
 # pg_auto_reindex extension
-comment = 'Autonomous background concurrent reindexing driven by idle learning'
-default_version = '1.0'
+comment = 'Autonomous B-Tree index bloat estimation and safe concurrent reindexing'
+default_version = '2.0'
 module_pathname = '$libdir/pg_auto_reindex'
-relocatable = true
+relocatable = false
+schema = public

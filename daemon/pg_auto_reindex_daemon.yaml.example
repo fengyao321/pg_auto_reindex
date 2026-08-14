@@ -1,0 +1,26 @@
+postgres:
+  host: "127.0.0.1"
+  port: 5432
+  user: "postgres"
+  password: ""
+  sslmode: "disable"
+  all_databases: true
+  databases: []
+
+scheduler:
+  naptime_seconds: 60
+  max_reindexes_per_idle: 2
+  min_bloat_bytes: 67108864
+  min_bloat_ratio: 0.30
+  lock_timeout_ms: 5000
+  consecutive_idle_required: 3
+
+idle:
+  cgroup_cpu_max_pct: 40.0
+  max_active_backends: 15
+  max_replication_lag_bytes: 67108864
+  ewma_alpha: 0.20
+  idle_ratio_threshold: 0.70
+
+log_level: "INFO"
+learning_stats_file: "~/.pg_auto_reindex_learning.json"

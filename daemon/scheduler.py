@@ -19,7 +19,7 @@ class ReindexScheduler:
     def scan_bloated_indexes(self, conn, db):
         try:
             with conn.cursor() as cur:
-                cur.execute("SELECT index_oid, schema_name, index_name, bloat_bytes, bloat_ratio FROM pg_auto_reindex_bloat_report()")
+                cur.execute("SELECT index_oid, schemaname, indexname, bloat_bytes, bloat_ratio FROM pg_auto_reindex_bloat_report()")
                 return cur.fetchall()
         except Exception as e:
             logger.error(f"Error scanning bloated indexes on {db}: {e}")

@@ -5,10 +5,10 @@ import signal
 import sys
 import psycopg2
 
-from .config import load_config
-from .sampler import ResourceSampler
-from .learner import EWMALearner
-from .scheduler import ReindexScheduler
+from config import load_config
+from sampler import ResourceSampler
+from learner import EWMALearner
+from scheduler import ReindexScheduler
 
 logger = logging.getLogger(__name__)
 shutdown_requested = False

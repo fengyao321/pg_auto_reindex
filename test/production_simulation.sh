@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #=============================================================================
-# pg_auto_reindex - 生产环境长时间模拟测试
+# pg_auto_reindex v2.0 - 生产环境长时间模拟测试
 #
 # 测试场景:
 #   1. 模拟多张业务表的 OLTP 读写负载 (INSERT/UPDATE/DELETE)
 #   2. 通过大量 UPDATE/DELETE 制造索引膨胀
-#   3. 启用 pg_auto_reindex 后台 worker
+#   3. 启动外部 Python 控制平面 Daemon 
 #   4. 周期性监控: EWMA 学习状态、索引膨胀率、自动重建历史
 #   5. 验证: 索引空间是否被回收、审计日志是否正确记录
 #
@@ -31,7 +31,6 @@ PGHOST="/tmp"
 TESTDB="auto_reindex_test"
 BLOAT_ROUNDS=5
 MONITOR_INTERVAL=15   # 监控采样间隔 (秒)
-LOG_DIR=""
 CLEANUP_ON_EXIT=true
 
 # ========================== 颜色输出 ==========================
@@ -48,7 +47,7 @@ usage() {
     cat <<EOF
 用法: $0 [选项]
 
-pg_auto_reindex 生产环境长时间模拟测试
+pg_auto_reindex v2.0 生产环境长时间模拟测试
 
 选项:
   --duration <minutes>     总运行时长 (默认: $DURATION_MINUTES 分钟)
@@ -58,13 +57,6 @@ pg_auto_reindex 生产环境长时间模拟测试
   --bloat-rounds <n>       膨胀制造轮次 (默认: $BLOAT_ROUNDS)
   --no-cleanup             测试结束后不清理数据库
   --help                   显示此帮助信息
-
-示例:
-  # 运行 30 分钟的模拟测试
-  $0 --duration 30
-
-  # 使用自定义端口和数据库
-  $0 --duration 15 --port 5433 --db mytest
 EOF
     exit 0
 }
@@ -110,14 +102,9 @@ mkdir -p "$LOG_DIR"
 cleanup() {
     log_section "清理 & 收尾"
 
-    # 停止所有后台作业
+    # 停止所有后台作业 (Daemon, Writers, Readers)
     jobs -p 2>/dev/null | xargs -r kill 2>/dev/null || true
     wait 2>/dev/null || true
-
-    # 恢复全局配置
-    run_sql "postgres" "ALTER SYSTEM RESET pg_auto_reindex.min_bloat_ratio;" 2>/dev/null || true
-    run_sql "postgres" "ALTER SYSTEM RESET pg_auto_reindex.min_bloat_bytes;" 2>/dev/null || true
-    run_sql "postgres" "SELECT pg_reload_conf();" 2>/dev/null || true
 
     if [ "$CLEANUP_ON_EXIT" = true ]; then
         log_step "删除测试数据库: ${TESTDB}"
@@ -143,13 +130,6 @@ log_info "psql: ${PSQL}"
 
 PG_VERSION=$(run_sql "postgres" "SELECT version();" | head -1)
 log_info "PostgreSQL: ${PG_VERSION}"
-
-# 检查扩展是否已安装到系统
-if ! run_sql "postgres" "SELECT 1 FROM pg_available_extensions WHERE name = 'pg_auto_reindex';" | grep -q 1; then
-    log_error "pg_auto_reindex 扩展未安装到 PostgreSQL. 请先执行 make install."
-    exit 1
-fi
-log_info "pg_auto_reindex 扩展已在可用列表中 ✓"
 
 # ========================== Phase 1: 创建测试数据库 & schema ==========================
 log_section "Phase 1: 创建测试数据库和表结构"
@@ -394,63 +374,69 @@ SELECT
     schemaname,
     indexname,
     pg_size_pretty(current_bytes) AS current_size,
-    round((estimated_bloat_ratio * 100)::numeric, 1) || '%' AS bloat_pct,
-    pg_size_pretty(estimated_bloat_bytes) AS bloat_size
+    round((bloat_ratio * 100)::numeric, 1) || '%' AS bloat_pct,
+    pg_size_pretty(bloat_bytes) AS bloat_size
 FROM pg_auto_reindex_bloat_report()
-ORDER BY estimated_bloat_bytes DESC;
+ORDER BY bloat_bytes DESC;
 "
 
-log_step "调用 pg_auto_reindex_stats() 查看 EWMA 学习状态 (当前时段):"
-run_sql_v "${TESTDB}" "
-SELECT slot_id, day_of_week, hour_of_day,
-       round(ewma_loadavg::numeric, 3) AS load_avg,
-       round(ewma_active_backends::numeric, 1) AS backends,
-       sample_count,
-       is_current_slot
-FROM pg_auto_reindex_stats()
-WHERE is_current_slot = true;
-"
-
-log_step "调用 pg_auto_reindex_status() 查看 worker 状态:"
+log_step "调用 pg_auto_reindex_status() 查看 C 扩展状态:"
 run_sql_v "${TESTDB}" "SELECT * FROM pg_auto_reindex_status();"
 
-# ========================== Phase 5: 配置低阈值并手动触发 ==========================
-log_section "Phase 5: 调整 GUC 参数 & 手动触发 Reindex 测试"
+# ========================== Phase 5: 启动外部 Python Daemon ==========================
+log_section "Phase 5: 启动外部 Python Daemon (控制平面)"
 
-# 配置阈值使得触发 reindex
+DAEMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../daemon" && pwd)"
+DAEMON_CONFIG="${LOG_DIR}/daemon_config.yaml"
+
 if [ "$PROD_MODE" = true ]; then
-    log_step "应用真实生产级阈值 (min_bloat_ratio=0.30, min_bloat_bytes=32MB)..."
-    run_sql "${TESTDB}" "ALTER SYSTEM SET pg_auto_reindex.min_bloat_ratio = 0.30;"
-    run_sql "${TESTDB}" "ALTER SYSTEM SET pg_auto_reindex.min_bloat_bytes = '32MB';"
+    MIN_BLOAT_RATIO=0.30
+    MIN_BLOAT_BYTES=33554432
 else
-    log_step "应用快速测试阈值 (min_bloat_ratio=0.10, min_bloat_bytes=1MB)..."
-    run_sql "${TESTDB}" "ALTER SYSTEM SET pg_auto_reindex.min_bloat_ratio = 0.10;"
-    run_sql "${TESTDB}" "ALTER SYSTEM SET pg_auto_reindex.min_bloat_bytes = '1MB';"
+    # 测试模式，极易触发 reindex
+    MIN_BLOAT_RATIO=0.10
+    MIN_BLOAT_BYTES=1048576
 fi
-run_sql "${TESTDB}" "SELECT pg_reload_conf();"
-# 等待配置生效
+
+cat > "${DAEMON_CONFIG}" <<EOF
+postgres:
+  host: '${PGHOST}'
+  port: ${PGPORT}
+  user: '$(whoami)'
+  password: ''
+  sslmode: 'disable'
+  all_databases: false
+  databases:
+    - '${TESTDB}'
+
+scheduler:
+  naptime_seconds: 15
+  max_reindexes_per_idle: 3
+  min_bloat_bytes: ${MIN_BLOAT_BYTES}
+  min_bloat_ratio: ${MIN_BLOAT_RATIO}
+  lock_timeout_ms: 3000
+  consecutive_idle_required: 1
+
+idle:
+  cgroup_cpu_max_pct: 80.0
+  max_active_backends: 100
+  max_replication_lag_bytes: 104857600
+  ewma_alpha: 0.20
+  idle_ratio_threshold: 0.95
+
+log_level: 'INFO'
+learning_stats_file: '${LOG_DIR}/learning_stats.json'
+EOF
+
+log_step " Daemon 配置 (${DAEMON_CONFIG}) 生成完毕，启动 Daemon..."
+
+(
+    cd "${DAEMON_DIR}"
+    python3 main.py --config "${DAEMON_CONFIG}" > "${LOG_DIR}/daemon.log" 2>&1
+) &
+DAEMON_PID=$!
+log_info "Python Daemon 已启动 (PID: ${DAEMON_PID})"
 sleep 2
-
-log_step "手动触发 pg_auto_reindex_trigger()..."
-TRIGGER_RESULT=$(run_sql "${TESTDB}" "SELECT pg_auto_reindex_trigger();")
-log_info "trigger 返回: ${TRIGGER_RESULT}"
-
-# 检查审计日志
-log_step "检查审计历史 pg_auto_reindex_history:"
-run_sql_v "${TESTDB}" "
-SELECT
-    id,
-    schemaname,
-    indexname,
-    to_char(start_time, 'YYYY-MM-DD HH24:MI:SS') AS start_time,
-    pg_size_pretty(bytes_before) AS before,
-    pg_size_pretty(bytes_after) AS after,
-    pg_size_pretty(bytes_saved) AS saved,
-    status,
-    round(extract(epoch from (end_time - start_time))::numeric, 2) || 's' AS duration
-FROM pg_auto_reindex_history
-ORDER BY id;
-"
 
 # ========================== Phase 6: 长时间并发 OLTP 模拟 ==========================
 log_section "Phase 6: 长时间并发 OLTP 模拟 (${DURATION_MINUTES} 分钟)"
@@ -568,24 +554,12 @@ log_info "后台 Writer-Inventory 已启动 (PID: ${WRITER4_PID})"
 READER_PID=$!
 log_info "后台 Reader-Queries 已启动 (PID: ${READER_PID})"
 
-# --- 后台定期触发器: 周期性手动触发 reindex ---
-(
-    while [ "$(date +%s)" -lt "${END_EPOCH}" ]; do
-        sleep 60
-        "${PSQL}" -h "${PGHOST}" -p "${PGPORT}" -d "${TESTDB}" -X -A -t -c "
-        SELECT pg_auto_reindex_trigger();
-        " >/dev/null 2>&1
-    done
-) &
-TRIGGER_PID=$!
-log_info "后台 Trigger (每60s) 已启动 (PID: ${TRIGGER_PID})"
-
 log_info "所有后台进程已启动, 开始 ${DURATION_MINUTES} 分钟监控..."
 echo ""
 
 # ========================== Phase 7: 监控循环 ==========================
 MONITOR_LOG="${LOG_DIR}/monitor.log"
-echo "timestamp,iteration,total_index_size_mb,bloated_count,reindexed_count,bytes_saved,is_idle,load_avg,active_backends" > "${MONITOR_LOG}"
+echo "timestamp,iteration,total_index_size_mb,bloated_count,reindexed_count,bytes_saved,ewma_active_backends,current_reindexing_index" > "${MONITOR_LOG}"
 
 while [ "$(date +%s)" -lt "${END_EPOCH}" ]; do
     ITERATION=$((ITERATION + 1))
@@ -607,28 +581,18 @@ while [ "$(date +%s)" -lt "${END_EPOCH}" ]; do
     REINDEX_INFO=$(run_sql "${TESTDB}" "
         SELECT coalesce(total_reindexed_count, 0) || '|' ||
                coalesce(total_bytes_saved, 0) || '|' ||
-               coalesce(is_idle::text, 'unknown')
+               coalesce(current_reindexing_index, 0)
         FROM pg_auto_reindex_status();
-    " 2>/dev/null || echo "0|0|unknown")
+    " 2>/dev/null || echo "0|0|0")
 
     REINDEXED_COUNT=$(echo "$REINDEX_INFO" | cut -d'|' -f1)
     BYTES_SAVED=$(echo "$REINDEX_INFO" | cut -d'|' -f2)
-    IS_IDLE=$(echo "$REINDEX_INFO" | cut -d'|' -f3)
+    CURR_IDX=$(echo "$REINDEX_INFO" | cut -d'|' -f3)
 
     HISTORY_COUNT=$(run_sql "${TESTDB}" "SELECT count(*) FROM pg_auto_reindex_history;" 2>/dev/null || echo "0")
 
-    LOAD_AVG=$(run_sql "${TESTDB}" "
-        SELECT round(ewma_loadavg::numeric, 2)
-        FROM pg_auto_reindex_stats()
-        WHERE is_current_slot = true
-        LIMIT 1;
-    " 2>/dev/null || echo "0")
-
     ACTIVE_BACKENDS=$(run_sql "${TESTDB}" "
-        SELECT round(ewma_active_backends::numeric, 1)
-        FROM pg_auto_reindex_stats()
-        WHERE is_current_slot = true
-        LIMIT 1;
+        SELECT coalesce((SELECT ewma_active_backends FROM pg_auto_reindex_learning_stats WHERE slot_id = (EXTRACT(DOW FROM current_timestamp) * 24 + EXTRACT(HOUR FROM current_timestamp))::int), 0);
     " 2>/dev/null || echo "0")
 
     BYTES_SAVED_PRETTY=$(run_sql "${TESTDB}" "SELECT pg_size_pretty(${BYTES_SAVED}::bigint);" 2>/dev/null || echo "0 bytes")
@@ -638,19 +602,20 @@ while [ "$(date +%s)" -lt "${END_EPOCH}" ]; do
         "$(date +'%H:%M:%S')" "${ITERATION}" \
         $((ELAPSED/60)) $((ELAPSED%60)) \
         $((REMAINING/60)) $((REMAINING%60))
-    printf "索引 ${BOLD}%s MB${NC} | 膨胀 ${YELLOW}%s${NC} | 已重建 ${GREEN}%s${NC} | 节省 ${GREEN}%s${NC} | 历史 %s | 空闲 %s | load ${LOAD_AVG}\n" \
+    printf "索引 ${BOLD}%s MB${NC} | 膨胀 ${YELLOW}%s${NC} | 已重建 ${GREEN}%s${NC} | 节省 ${GREEN}%s${NC} | 历史 %s | EWMA backends %s | CurrIdx %s\n" \
         "${TOTAL_IDX_SIZE}" "${BLOATED_COUNT}" "${REINDEXED_COUNT}" \
-        "${BYTES_SAVED_PRETTY}" "${HISTORY_COUNT}" "${IS_IDLE}"
+        "${BYTES_SAVED_PRETTY}" "${HISTORY_COUNT}" "${ACTIVE_BACKENDS}" "${CURR_IDX}"
 
     # 写入日志
-    echo "$(date -Iseconds),${ITERATION},${TOTAL_IDX_SIZE},${BLOATED_COUNT},${REINDEXED_COUNT},${BYTES_SAVED},${IS_IDLE},${LOAD_AVG},${ACTIVE_BACKENDS}" >> "${MONITOR_LOG}"
+    echo "$(date -Iseconds),${ITERATION},${TOTAL_IDX_SIZE},${BLOATED_COUNT},${REINDEXED_COUNT},${BYTES_SAVED},${ACTIVE_BACKENDS},${CURR_IDX}" >> "${MONITOR_LOG}"
 
     sleep "${MONITOR_INTERVAL}"
 done
 
 # 等待后台进程结束
-log_info "等待后台写入器结束..."
-wait "${WRITER1_PID}" "${WRITER2_PID}" "${WRITER3_PID}" "${WRITER4_PID}" "${READER_PID}" "${TRIGGER_PID}" 2>/dev/null || true
+log_info "等待后台任务结束..."
+kill ${WRITER1_PID} ${WRITER2_PID} ${WRITER3_PID} ${WRITER4_PID} ${READER_PID} ${DAEMON_PID} 2>/dev/null || true
+wait 2>/dev/null || true
 
 # ========================== Phase 8: 最终报告 ==========================
 log_section "Phase 8: 最终测试报告"
@@ -675,10 +640,10 @@ SELECT
     schemaname,
     indexname,
     pg_size_pretty(current_bytes) AS current_size,
-    round((estimated_bloat_ratio * 100)::numeric, 1) || '%' AS bloat_pct,
-    pg_size_pretty(estimated_bloat_bytes) AS bloat_size
+    round((bloat_ratio * 100)::numeric, 1) || '%' AS bloat_pct,
+    pg_size_pretty(bloat_bytes) AS bloat_size
 FROM pg_auto_reindex_bloat_report()
-ORDER BY estimated_bloat_bytes DESC;
+ORDER BY bloat_bytes DESC;
 "
 
 log_step "3) Worker 最终状态:"
@@ -705,17 +670,12 @@ log_step "5) EWMA 学习矩阵 (有样本的时段):"
 run_sql_v "${TESTDB}" "
 SELECT
     slot_id,
-    CASE day_of_week
-        WHEN 0 THEN 'Sun' WHEN 1 THEN 'Mon' WHEN 2 THEN 'Tue'
-        WHEN 3 THEN 'Wed' WHEN 4 THEN 'Thu' WHEN 5 THEN 'Fri'
-        WHEN 6 THEN 'Sat'
-    END AS day,
-    hour_of_day || ':00' AS hour,
-    round(ewma_loadavg::numeric, 3) AS load_avg,
-    round(ewma_active_backends::numeric, 1) AS backends,
-    sample_count,
-    CASE WHEN is_current_slot THEN '◀' ELSE '' END AS current
-FROM pg_auto_reindex_stats()
+    day_of_week,
+    hour_of_day,
+    ewma_cpu_usage,
+    ewma_active_backends,
+    sample_count
+FROM pg_auto_reindex_learning_stats
 WHERE sample_count > 0
 ORDER BY slot_id;
 "
@@ -733,24 +693,13 @@ WHERE relkind = 'r' AND relnamespace = 'public'::regnamespace
 ORDER BY pg_total_relation_size(oid) DESC;
 "
 
-log_step "7) 业务零干扰与锁无冲突证明 (Non-blocking & Lock Proof):"
-run_sql_v "${TESTDB}" "
-SELECT
-    'ShareUpdateExclusiveLock (CONCURRENTLY)' AS lock_type,
-    '允许 (Concurrent INSERT/UPDATE/DELETE/SELECT)' AS business_impact,
-    coalesce(sum(CASE WHEN wait_event_type = 'Lock' THEN 1 ELSE 0 END), 0) AS active_lock_waits,
-    '0 次阻塞 (零锁等待)' AS proof_result
-FROM pg_stat_activity
-WHERE datname = '${TESTDB}';
-"
-
 # ========================== 汇总结论 ==========================
 FINAL_REINDEX_COUNT=$(run_sql "${TESTDB}" "SELECT count(*) FROM pg_auto_reindex_history;" 2>/dev/null || echo "0")
 FINAL_BYTES_SAVED=$(run_sql "${TESTDB}" "SELECT coalesce(sum(bytes_saved), 0) FROM pg_auto_reindex_history WHERE upper(status) = 'SUCCESS';" 2>/dev/null || echo "0")
 FINAL_BYTES_PRETTY=$(run_sql "${TESTDB}" "SELECT pg_size_pretty(${FINAL_BYTES_SAVED}::bigint);" 2>/dev/null || echo "0 bytes")
 FINAL_SUCCESS=$(run_sql "${TESTDB}" "SELECT count(*) FROM pg_auto_reindex_history WHERE upper(status) = 'SUCCESS';" 2>/dev/null || echo "0")
 FINAL_FAILED=$(run_sql "${TESTDB}" "SELECT count(*) FROM pg_auto_reindex_history WHERE upper(status) != 'SUCCESS';" 2>/dev/null || echo "0")
-EWMA_SLOTS_WITH_DATA=$(run_sql "${TESTDB}" "SELECT count(*) FROM pg_auto_reindex_stats() WHERE sample_count > 0;" 2>/dev/null || echo "0")
+EWMA_SLOTS_WITH_DATA=$(run_sql "${TESTDB}" "SELECT count(*) FROM pg_auto_reindex_learning_stats WHERE sample_count > 0;" 2>/dev/null || echo "0")
 
 echo ""
 log_section "测试结论"
@@ -763,6 +712,7 @@ echo -e "  ${BOLD}  - 成功:${NC}           ${FINAL_SUCCESS} 次"
 echo -e "  ${BOLD}  - 失败:${NC}           ${FINAL_FAILED} 次"
 echo -e "  ${BOLD}总节省空间:${NC}         ${FINAL_BYTES_PRETTY}"
 echo -e "  ${BOLD}监控日志:${NC}           ${MONITOR_LOG}"
+echo -e "  ${BOLD}Daemon 日志:${NC}         ${LOG_DIR}/daemon.log"
 echo ""
 
 # 判断测试是否通过
@@ -775,8 +725,3 @@ fi
 
 echo ""
 log_info "完成! 日志保存在: ${LOG_DIR}"
-
-# 恢复默认配置
-run_sql "${TESTDB}" "ALTER SYSTEM RESET pg_auto_reindex.min_bloat_ratio;" 2>/dev/null || true
-run_sql "${TESTDB}" "ALTER SYSTEM RESET pg_auto_reindex.min_bloat_bytes;" 2>/dev/null || true
-run_sql "${TESTDB}" "SELECT pg_reload_conf();" 2>/dev/null || true
